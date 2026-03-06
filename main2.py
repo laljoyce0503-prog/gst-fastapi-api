@@ -141,8 +141,12 @@ def create_submission(submission: Submission):
 
         form_data_str = json.dumps(submission.form_data)
 
-        sql = "INSERT INTO vueform_sub (form_key, form_data) VALUES (%s, %s)"
-        cursor.execute(sql, (submission.form_key, form_data_str))
+        sql = """
+        INSERT INTO vueform_sub (form_key, trn_number, form_data)
+        VALUES (%s, %s, %s)
+        """
+
+        cursor.execute(sql, (submission.form_key, None, form_data_str))
 
         conn.commit()
 
@@ -159,7 +163,7 @@ def create_submission(submission: Submission):
             cursor.close()
         if conn:
             conn.close()
-        
+
 # 5. DELETE: Remove a record
 @app.delete("/api/submissions/{item_id}")
 def delete_submission(item_id: int):
