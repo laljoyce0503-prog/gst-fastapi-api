@@ -132,6 +132,7 @@ def get_submission(item_id: int):
         #cursor.close()
         #conn.close()
 def create_submission(submission: Submission):
+
     conn = None
     cursor = None
 
@@ -142,12 +143,11 @@ def create_submission(submission: Submission):
         form_data_str = json.dumps(submission.form_data)
 
         sql = """
-        INSERT INTO vueform_sub (form_key, trn_number, form_data)
-        VALUES (%s, %s, %s)
+        INSERT INTO vueform_sub (form_key, form_data)
+        VALUES (%s, %s)
         """
 
-        cursor.execute(sql, (submission.form_key, None, form_data_str))
-
+        cursor.execute(sql, (submission.form_key, form_data_str))
         conn.commit()
 
         return {
