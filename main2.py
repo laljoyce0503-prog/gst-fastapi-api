@@ -124,6 +124,9 @@ def get_submission(item_id: int):
         #cursor.close()
         #conn.close()
 def create_submission(submission: Submission):
+    conn = None
+    cursor = None
+
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -135,15 +138,19 @@ def create_submission(submission: Submission):
 
         conn.commit()
 
-        return {"id": cursor.lastrowid, "message": "Record added"}
+        return {
+            "id": cursor.lastrowid,
+            "message": "Record added to database"
+        }
 
     except Exception as e:
         return {"error": str(e)}
 
     finally:
-        cursor.close()
-        conn.close()
-
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
         
 # 5. DELETE: Remove a record
 @app.delete("/api/submissions/{item_id}")
