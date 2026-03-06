@@ -123,26 +123,27 @@ def get_submission(item_id: int):
     #finally:
         #cursor.close()
         #conn.close()
-def create_submission(payload: Dict[str, Any] = Body(...)):
-    conn = get_db_connection()
-    cursor = conn.cursor()
+def create_submission(submission: Submission):
     try:
-        form_key = payload.get("form_key", "gst_registration")
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
-        form_data_str = json.dumps(payload)
+        form_data_str = json.dumps(submission.form_data)
 
         sql = "INSERT INTO vueform_sub (form_key, form_data) VALUES (%s, %s)"
-        cursor.execute(sql, (form_key, form_data_str))
+        cursor.execute(sql, (submission.form_key, form_data_str))
+
         conn.commit()
 
-        return {
-            "id": cursor.lastrowid,
-            "message": "Record added successfully"
-        }
+        return {"id": cursor.lastrowid, "message": "Record added"}
+
+    except Exception as e:
+        return {"error": str(e)}
 
     finally:
         cursor.close()
         conn.close()
+
         
 # 5. DELETE: Remove a record
 @app.delete("/api/submissions/{item_id}")
