@@ -116,19 +116,40 @@ def get_submission(item_id: int):
 
 # 4. POST: Add new data
 @app.post("/api/submissions", status_code=201)
-def create_submission(submission: Submission):
+
+#def create_submission(submission: Submission):
+    #conn = get_db_connection()
+    #cursor = conn.cursor()
+    #try:
+        #form_data_str = json.dumps(submission.form_data)
+        #sql = "INSERT INTO vueform_sub (form_key, form_data) VALUES (%s, %s)"
+        #cursor.execute(sql, (submission.form_key, form_data_str))
+        #conn.commit()
+        #return {"id": cursor.lastrowid, "message": "Record added to database"}
+    #finally:
+        #cursor.close()
+        #conn.close()
+def create_submission(payload: Dict[str, Any] = Body(...)):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        form_data_str = json.dumps(submission.form_data)
+        form_key = payload.get("form_key", "gst_registration")
+
+        form_data_str = json.dumps(payload)
+
         sql = "INSERT INTO vueform_sub (form_key, form_data) VALUES (%s, %s)"
-        cursor.execute(sql, (submission.form_key, form_data_str))
+        cursor.execute(sql, (form_key, form_data_str))
         conn.commit()
-        return {"id": cursor.lastrowid, "message": "Record added to database"}
+
+        return {
+            "id": cursor.lastrowid,
+            "message": "Record added successfully"
+        }
+
     finally:
         cursor.close()
         conn.close()
-
+        
 # 5. DELETE: Remove a record
 @app.delete("/api/submissions/{item_id}")
 def delete_submission(item_id: int):
