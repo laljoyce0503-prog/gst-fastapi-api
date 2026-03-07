@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict, Any, Optional, List
 import os
-from fastapi import body
+from fastapi import Body
 app = FastAPI(title="GST Database API")
 
 # --- CORS Configuration ---
