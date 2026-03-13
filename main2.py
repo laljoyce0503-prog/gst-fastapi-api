@@ -28,7 +28,8 @@ db_config = {
     "password": os.getenv("MYSQLPASSWORD"),
     "database": os.getenv("MYSQLDATABASE"),
     "port": int(os.getenv("MYSQLPORT")),
-    "charset": "utf8mb4"
+    "charset": "utf8mb4",
+    "ssl_disabled": False
 }
 #db_config = {"host": os.getenv("MYSQLHOST"),"user": os.getenv("MYSQLUSER"),"password": os.getenv("MYSQLPASSWORD"),"database": os.getenv("MYSQLDATABASE"),"port": int(os.getenv("MYSQLPORT"))}
 # --- Pydantic Models ---
