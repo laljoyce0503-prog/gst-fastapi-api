@@ -4,3 +4,4 @@ mysql-connector-python
 pydantic
 python-multipart
 python-dotenv
+requests==2.31.0
