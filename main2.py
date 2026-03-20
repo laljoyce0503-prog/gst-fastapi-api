@@ -1,11 +1,11 @@
 import json
 import mysql.connector
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict, Any, Optional, List
 import os
-from fastapi import Body
+
 app = FastAPI(title="GST Database API")
 
 # --- CORS Configuration ---
@@ -18,10 +18,17 @@ app.add_middleware(
 )
 
 # Database Configuration
-db_config = {"host": "localhost","user": "root","password": "Joyce@0503","database": "gst_db","charset": "utf8mb4"}
+#db_config = {"host": "localhost","user": "root","password": "Joyce@0503","database": "gst_db","charset": "utf8mb4"}
 
 import os
-
+db_config = {
+    "host": os.getenv("MYSQLHOST"),
+    "user": os.getenv("MYSQLUSER"),
+    "password": os.getenv("MYSQLPASSWORD"),
+    "database": os.getenv("MYSQLDATABASE"),
+    "port": int(os.getenv("MYSQLPORT")),
+    "charset": "utf8mb4"
+}
 #db_config = {"host": os.getenv("MYSQLHOST"),"user": os.getenv("MYSQLUSER"),"password": os.getenv("MYSQLPASSWORD"),"database": os.getenv("MYSQLDATABASE"),"port": int(os.getenv("MYSQLPORT"))}
 # --- Pydantic Models ---
 class Submission(BaseModel):
