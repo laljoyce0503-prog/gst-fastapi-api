@@ -1,236 +1,205 @@
 import json
 import mysql.connector
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware # Import CORS
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
+import os
 
-app = FastAPI()
+app = FastAPI(title="GST Database API")
 
-# --- 1. ENABLE CORS (Crucial for Frontend) ---
-# This allows your Vue.js app (usually running on port 3000 or 8080)
-# to talk to this Python backend (running on port 8000).
-origins = [
-    "http://localhost",
-    "http://localhost:3000",
-    "http://localhost:8080",
-    "http://127.0.0.1:3000"
-]
-
+# --- CORS Configuration ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Allow all origins for development (change for production)
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Database Configuration
-db_config = {
-    "host": "localhost",
-    "user": "root",
-    "password": "Joyce@0503", # Updated password as per your request
-    "database": "gst_db"
-}
+db_config = {"host": "localhost","user": "root","password": "Joyce@0503","database": "gst_db","charset": "utf8mb4"}
 
+import os
+
+#db_config = {"host": os.getenv("MYSQLHOST"),"user": os.getenv("MYSQLUSER"),"password": os.getenv("MYSQLPASSWORD"),"database": os.getenv("MYSQLDATABASE"),"port": int(os.getenv("MYSQLPORT"))}
 # --- Pydantic Models ---
 class Submission(BaseModel):
     form_key: str
     form_data: Dict[str, Any]
 
-class SubmissionUpdate(BaseModel):
-    form_key: Optional[str] = None
-    form_data: Optional[Dict[str, Any]] = None
-
 # --- Helper Functions ---
 def get_db_connection():
-    return mysql.connector.connect(**db_config)
+    try:
+        return mysql.connector.connect(**db_config)
+    except mysql.connector.Error as err:
+        raise HTTPException(status_code=500, detail=f"Database Connection Error: {err}")
+
+def safe_json_loads(data: str):
+    """Safely parse JSON from LONGTEXT column, handle plain strings if necessary."""
+    try:
+        return json.loads(data) if data else {}
+    except (json.JSONDecodeError, TypeError):
+        return data # Return as raw string if it's not JSON
 
 # --- ROUTES ---
 
-# 0. ROOT ROUTE (Fixes the 404 error on home page)
 @app.get("/")
 def read_root():
     return {
-        "message": "GST API is running!",
-        "documentation": "Go to /docs to see the Swagger UI"
+        "status": "online",
+        "message": "GST API is connected to gst_db",
+        "endpoints": {
+            "all_data": "/api/submissions",
+            "search": "/api/submissions/search?key=your_key",
+            "docs": "/docs"
+        }
     }
 
-# 1. GET ALL
-@app.get("/api/drafts")
-def get_drafts(mobile: Optional[str] = None):
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT id, form_data FROM vueform_sub")
-    results = cursor.fetchall()
-    conn.close()
-    
-    drafts = []
-    for row in results:
-        if row["form_data"]:
-            try:
-                data = json.loads(row["form_data"])
-                row_mobile = data.get("_contact_mobile") or data.get("mobile")
-                
-                # Privacy Filter: If a mobile is provided, only show drafts 
-                # that match that mobile number.
-                if mobile and str(row_mobile) != str(mobile):
-                    continue
-                
-                # If no mobile is provided, return empty
-                if not mobile:
-                    continue
-
-                drafts.append({
-                    "id": row["id"],
-                    "legal_name": data.get("legal_name", "Unknown Name"),
-                    "mobile": row_mobile or "N/A"
-                })
-            except:
-                pass
-    return drafts
-
-@app.get("/api/submissions")
+# 1. GET ALL: Fetch existing data from the table
+@app.get("/api/submissions", response_model=List[Dict[str, Any]])
 def get_submissions():
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM vueform_sub")
-    results = cursor.fetchall()
-    conn.close()
-    
-    for row in results:
-        if row["form_data"]:
-            row["form_data"] = json.loads(row["form_data"])
+    try:
+        cursor.execute("SELECT * FROM vueform_sub ORDER BY id DESC")
+        results = cursor.fetchall()
+        
+        for row in results:
+            row["form_data"] = safe_json_loads(row["form_data"])
             
-    return results
+        return results
+    finally:
+        cursor.close()
+        conn.close()
 
-# 2. GET ONE
+# 2. SEARCH: Filter by form_key (useful if you have many forms)
+@app.get("/api/submissions/search")
+def search_submissions(key: str = Query(..., description="The form_key to filter by")):
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT * FROM vueform_sub WHERE form_key = %s", (key,))
+        results = cursor.fetchall()
+        
+        for row in results:
+            row["form_data"] = safe_json_loads(row["form_data"])
+            
+        return results
+    finally:
+        cursor.close()
+        conn.close()
+
+# 3. GET ONE: Retrieve by ID
 @app.get("/api/submissions/{item_id}")
 def get_submission(item_id: int):
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM vueform_sub WHERE id = %s", (item_id,))
-    result = cursor.fetchone()
-    conn.close()
-    
-    if not result:
-        raise HTTPException(status_code=404, detail="Submission not found")
-    
-    if result["form_data"]:
-        result["form_data"] = json.loads(result["form_data"])
-        
-    return result
-
-# 3. POST
-@app.post("/api/submissions", status_code=201)
-def create_submission(submission: Submission):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    form_data_str = json.dumps(submission.form_data)
-    
-    sql = "INSERT INTO vueform_sub (form_key, form_data) VALUES (%s, %s)"
-    val = (submission.form_key, form_data_str)
-    
-    cursor.execute(sql, val)
-    conn.commit()
-    new_id = cursor.lastrowid
-    conn.close()
-    
-    return {"id": new_id, "message": "Created successfully"}
-
-# 4. PUT
-@app.put("/api/submissions/{item_id}")
-def update_submission(item_id: int, submission: Submission):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT id FROM vueform_sub WHERE id = %s", (item_id,))
-    if not cursor.fetchone():
-        conn.close()
-        raise HTTPException(status_code=404, detail="Submission not found")
-
-    form_data_str = json.dumps(submission.form_data)
-    
-    sql = "UPDATE vueform_sub SET form_key = %s, form_data = %s WHERE id = %s"
-    val = (submission.form_key, form_data_str, item_id)
-    
-    cursor.execute(sql, val)
-    conn.commit()
-    conn.close()
-    
-    return {"message": "Updated successfully"}
-
-# --- New Route: Jurisdiction Proxy ---
-import requests
-
-@app.get("/api/jurisdiction/{state_code}/{pincode}")
-def get_jurisdiction(state_code: str, pincode: str):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Origin": "https://reg.gst.gov.in",
-        "Referer": "https://reg.gst.gov.in/registration/",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin"
-    }
-    # Disable SSL Warnings for verify=False
-    import urllib3
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    
     try:
-        results = {}
-        # 1. Fetch Commissionerate 
-        comm_url = f"https://reg.gst.gov.in/master/jursd/bypincode/commisionerate/{state_code}/{pincode}"
-        r1 = requests.get(comm_url, headers=headers, timeout=10, verify=False)
-        results["commissionerates"] = r1.json().get("data", []) if r1.status_code == 200 else []
+        cursor.execute("SELECT * FROM vueform_sub WHERE id = %s", (item_id,))
+        result = cursor.fetchone()
         
-        # 2. Fetch Ward
-        ward_url = f"https://reg.gst.gov.in/master/jursd/bypincode/ward/{state_code}/{pincode}"
-        r2 = requests.get(ward_url, headers=headers, timeout=10, verify=False)
-        results["wards"] = r2.json().get("data", []) if r2.status_code == 200 else []
+        if not result:
+            raise HTTPException(status_code=404, detail="ID not found in database")
+        
+        result["form_data"] = safe_json_loads(result["form_data"])
+        return result
+    finally:
+        cursor.close()
+        conn.close()
 
-        # 3. Fetch Division
-        div_url = f"https://reg.gst.gov.in/master/jursd/bypincode/division/{state_code}/WT/{pincode}"
-        r3 = requests.get(div_url, headers=headers, timeout=10, verify=False)
-        results["divisions"] = r3.json().get("data", []) if r3.status_code == 200 else []
-        
-        # 4. Fetch Range
-        results["ranges"] = []
-        if results["divisions"] and len(results["divisions"]) > 0:
-            div_code = results["divisions"][0].get("c")
-            range_url = f"https://reg.gst.gov.in/master/jursd/bypincode/range/{state_code}/{div_code}/{pincode}"
-            r4 = requests.get(range_url, headers=headers, timeout=10, verify=False)
-            results["ranges"] = r4.json().get("data", []) if r4.status_code == 200 else []
-            
-        return results
-    except Exception as e:
+# 4. POST: Add new data
+@app.post("/api/submissions", status_code=201)
+
+#def create_submission(submission: Submission):
+    #conn = get_db_connection()
+    #cursor = conn.cursor()
+    #try:
+        #form_data_str = json.dumps(submission.form_data)
+        #sql = "INSERT INTO vueform_sub (form_key, form_data) VALUES (%s, %s)"
+        #cursor.execute(sql, (submission.form_key, form_data_str))
+        #conn.commit()
+        #return {"id": cursor.lastrowid, "message": "Record added to database"}
+    #finally:
+        #cursor.close()
+        #conn.close()
+def create_submission(payload: Dict[str, Any] = Body(...)):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        form_key = payload.get("form_key", "gst_registration")
+
+        form_data_str = json.dumps(payload)
+
+        sql = "INSERT INTO vueform_sub (form_key, form_data) VALUES (%s, %s)"
+        cursor.execute(sql, (form_key, form_data_str))
+        conn.commit()
+
         return {
-            "commissionerates": [],
-            "wards": [],
-            "divisions": [],
-            "ranges": [],
-            "error": str(e)
+            "id": cursor.lastrowid,
+            "message": "Record added successfully"
         }
 
-# 5. DELETE
+    finally:
+        cursor.close()
+        conn.close()
+        
+# 5. DELETE: Remove a record
 @app.delete("/api/submissions/{item_id}")
 def delete_submission(item_id: int):
     conn = get_db_connection()
     cursor = conn.cursor()
-    
-    cursor.execute("DELETE FROM vueform_sub WHERE id = %s", (item_id,))
-    conn.commit()
-    
-    if cursor.rowcount == 0:
+    try:
+        cursor.execute("DELETE FROM vueform_sub WHERE id = %s", (item_id,))
+        conn.commit()
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Record not found")
+        return {"message": f"Record {item_id} deleted"}
+    finally:
+        cursor.close()
         conn.close()
-        raise HTTPException(status_code=404, detail="Submission not found")
-        
-    conn.close()
-    return {"message": "Deleted successfully"}
+
+from fastapi import Body
+
+# 4. PATCH: Update partial data inside form_data (e.g., TRN number)
+@app.patch("/api/submissions/{item_id}")
+def update_submission(item_id: int, payload: Dict[str, Any] = Body(...)):
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        # Fetch existing record
+        cursor.execute("SELECT form_data FROM vueform_sub WHERE id = %s", (item_id,))
+        row = cursor.fetchone()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Record not found")
+
+        # Load existing JSON
+        existing_data = safe_json_loads(row["form_data"])
+        if not isinstance(existing_data, dict):
+            existing_data = {}
+
+        # Merge incoming payload into form_data
+        for key, value in payload.items():
+            existing_data[key] = value
+
+        # Save back to DB
+        cursor.execute(
+            "UPDATE vueform_sub SET form_data = %s WHERE id = %s",
+            (json.dumps(existing_data), item_id)
+        )
+        conn.commit()
+
+        return {
+            "message": "Record updated successfully",
+            "id": item_id,
+            "updated_fields": payload
+        }
+
+    finally:
+        cursor.close()
+        conn.close()
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("main2:app", host="0.0.0.0", port=8000, reload=True)
