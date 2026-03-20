@@ -206,6 +206,25 @@ def update_submission(item_id: int, payload: Dict[str, Any] = Body(...)):
     finally:
         cursor.close()
         conn.close()
+        
+# 5. PUT: Full replacement of existing submission
+@app.put("/api/submissions/{item_id}")
+def update_submission_put(item_id: int, submission: Submission):
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT id FROM vueform_sub WHERE id = %s", (item_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Record not found")
+
+        form_data_str = json.dumps(submission.form_data)
+        sql = "UPDATE vueform_sub SET form_key = %s, form_data = %s WHERE id = %s"
+        cursor.execute(sql, (submission.form_key, form_data_str, item_id))
+        conn.commit()
+        return {"message": "Updated successfully", "id": item_id}
+    finally:
+        cursor.close()
+        conn.close()
 
 if __name__ == "__main__":
     import uvicorn
