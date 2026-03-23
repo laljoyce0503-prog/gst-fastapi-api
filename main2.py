@@ -233,33 +233,28 @@ def get_gst_districts(gst_code: str):
     try:
         response = requests.get(
             url,
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Accept": "application/json",
-                "Referer": "https://reg.gst.gov.in/",
-            },
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json", "Referer": "https://reg.gst.gov.in/"},
             timeout=10
         )
 
         if response.status_code != 200:
-            raise HTTPException(status_code=500, detail="GST API failed")
-
-        data = response.json()
-
-        if "data" not in data:
+            # PROFESSIONAL FIX: Silence the error and return empty list to prevent frontend 500 crash.
+            # This allows the frontend fallback to trigger without a 'Red Error'.
             return []
 
-        # Normalize for frontend
+        data = response.json()
+        if not data or "data" not in data:
+            return []
+
         return [
-            {
-                "value": d.get("c") or d.get("v") or "",
-                "label": d.get("n") or d.get("l") or "",
-            }
+            {"value": d.get("c") or d.get("v") or "", "label": d.get("n") or d.get("l") or ""}
             for d in data["data"]
         ]
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # PROFESSIONAL FIX: Silent catch - never return 500 for a proxy lookup
+        print(f"District lookup failed: {str(e)}")
+        return []
         
 if __name__ == "__main__":
     import uvicorn
