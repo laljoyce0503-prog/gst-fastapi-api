@@ -226,6 +226,41 @@ def update_submission_put(item_id: int, submission: Submission):
         cursor.close()
         conn.close()
 
+@app.get("/api/gst/districts/{gst_code}")
+def get_gst_districts(gst_code: str):
+    url = f"https://reg.gst.gov.in/master/jursd/get/districts/{gst_code}"
+
+    try:
+        response = requests.get(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "application/json",
+                "Referer": "https://reg.gst.gov.in/",
+            },
+            timeout=10
+        )
+
+        if response.status_code != 200:
+            raise HTTPException(status_code=500, detail="GST API failed")
+
+        data = response.json()
+
+        if "data" not in data:
+            return []
+
+        # Normalize for frontend
+        return [
+            {
+                "value": d.get("c") or d.get("v") or "",
+                "label": d.get("n") or d.get("l") or "",
+            }
+            for d in data["data"]
+        ]
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+        
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main2:app", host="0.0.0.0", port=8000, reload=True)
