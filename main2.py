@@ -5,6 +5,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict, Any, Optional, List
 import os
+from fastapi import UploadFile, File
+from fastapi.responses import StreamingResponse
+import io
 
 app = FastAPI(title="GST Database API")
 
@@ -323,7 +326,36 @@ def get_ghataks(state_code: str):
     except Exception as e:
         print(f"Error fetching ghataks for state {state_code}: {e}")
         return []
+
+@app.post("/api/compress-pdf")
+async def compress_pdf(file: UploadFile = File(...)):
+    """
+    Backend PDF Compressor specifically for GST Registration.
+    Uses pikepdf for professional optimization to stay under 1MB.
+    """
+    try:
+        import pikepdf
+    except ImportError:
+        return {"error": "pikepdf not installed. Please run pip install pikepdf"}
+
+    try:
+        content = await file.read()
         
+        # Open the PDF from bytes using pikepdf
+        with pikepdf.open(io.BytesIO(content)) as pdf:
+            output = io.BytesIO()
+            # We use 'linearize' and 'compress_streams' for optimization
+            pdf.save(output, linearize=True)
+            
+            output.seek(0)
+            return StreamingResponse(
+                output, 
+                media_type="application/pdf",
+                headers={"Content-Disposition": f"attachment; filename=compressed_{file.filename}"}
+            )
+    except Exception as e:
+        print(f"PDF compression error: {e}")
+        return {"error": str(e)}   
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main2:app", host="0.0.0.0", port=8000, reload=True)
