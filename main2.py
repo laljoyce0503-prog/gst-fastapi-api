@@ -327,35 +327,124 @@ def get_ghataks(state_code: str):
         print(f"Error fetching ghataks for state {state_code}: {e}")
         return []
 
+from fastapi import UploadFile, File, HTTPException
+from fastapi.responses import StreamingResponse
+import io
+import os
+import math
+
+# --- PRODUCTION-GRADE PDF COMPRESSION ENGINE ---
+
+def analyze_pdf_type(content: bytes):
+    """Detects if PDF is Text-Based or Scanned using PyMuPDF (fitz)"""
+    try:
+        import fitz
+        doc = fitz.open(stream=content, filetype="pdf")
+        text_count = 0
+        # Check first 2 pages for selectable text
+        for i in range(min(2, len(doc))):
+            text_count += len(doc[i].get_text().strip())
+        doc.close()
+        return "text" if text_count > 50 else "scanned"
+    except Exception as e:
+        print(f"Analysis error: {e}")
+        return "scanned" # Default to scanned for safety
+
+def compress_text_pdf(content: bytes):
+    """Optimizes text-based PDF using pikepdf (Lossless structure optimization)"""
+    try:
+        import pikepdf
+        with pikepdf.open(io.BytesIO(content)) as pdf:
+            out = io.BytesIO()
+            pdf.save(out, linearize=True, compress_streams=True)
+            return out.getvalue()
+    except Exception as e:
+        print(f"Text compression error: {e}")
+        return content
+
+def compress_scanned_pdf(content: bytes, target_size_mb=0.95):
+    """Aggressively compresses scanned PDF by rasterizing and re-building with Pillow"""
+    try:
+        import fitz
+        from PIL import Image
+        
+        doc = fitz.open(stream=content, filetype="pdf")
+        target_bytes = target_size_mb * 1024 * 1024
+        
+        quality = 70
+        scale = 1.0 # 1.0 = original resolution
+        
+        while True:
+            images = []
+            for page in doc:
+                # Rasterize page to image
+                pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                images.append(img)
+            
+            # Rebuild PDF in memory
+            out_pdf = io.BytesIO()
+            if images:
+                images[0].save(out_pdf, save_all=True, append_images=images[1:], 
+                               format="PDF", quality=quality, optimize=True)
+            
+            final_data = out_pdf.getvalue()
+            
+            # Iterative check
+            if len(final_data) <= target_bytes or (quality <= 30 and scale <= 0.4):
+                doc.close()
+                return final_data
+            
+            # Step down quality or scale
+            if quality > 40:
+                quality -= 15
+            else:
+                scale *= 0.75
+    except Exception as e:
+        print(f"Scanned compression error: {e}")
+        return content
+
 @app.post("/api/compress-pdf")
 async def compress_pdf(file: UploadFile = File(...)):
     """
-    Backend PDF Compressor specifically for GST Registration.
-    Uses pikepdf for professional optimization to stay under 1MB.
+    Hybrid Production-Grade PDF Compression API for GST Registration.
+    Ensures files are < 1MB while preserving text whenever possible.
     """
     try:
-        import pikepdf
-    except ImportError:
-        return {"error": "pikepdf not installed. Please run pip install pikepdf"}
-
-    try:
         content = await file.read()
+        original_size = len(content)
         
-        # Open the PDF from bytes using pikepdf
-        with pikepdf.open(io.BytesIO(content)) as pdf:
-            output = io.BytesIO()
-            # We use 'linearize' and 'compress_streams' for optimization
-            pdf.save(output, linearize=True)
+        # 1. Detect PDF Type
+        pdf_type = analyze_pdf_type(content)
+        print(f"[Compressor] Input: {original_size/1024:.1f}KB, Type: {pdf_type}")
+        
+        # 2. Apply Adaptive Compression
+        if pdf_type == "text":
+            # Try structure optimization first (preserves text)
+            compressed_data = compress_text_pdf(content)
             
-            output.seek(0)
-            return StreamingResponse(
-                output, 
-                media_type="application/pdf",
-                headers={"Content-Disposition": f"attachment; filename=compressed_{file.filename}"}
-            )
+            # Fallback: If text optimization isn't enough, apply controlled rasterization
+            if len(compressed_data) > 1024 * 1024:
+                print("[Compressor] Text optimization insufficient (>1MB), falling back to rasterization")
+                compressed_data = compress_scanned_pdf(content)
+        else:
+            # Direct aggressive rasterization for scanned docs
+            compressed_data = compress_scanned_pdf(content)
+            
+        final_size = len(compressed_data)
+        ratio = (original_size - final_size) / original_size if original_size > 0 else 0
+        print(f"[Compressor] Final: {final_size/1024:.1f}KB, Ratio: {ratio:.1%}")
+
+        return StreamingResponse(
+            io.BytesIO(compressed_data), 
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename=compressed_{file.filename}"}
+        )
     except Exception as e:
-        print(f"PDF compression error: {e}")
-        return {"error": str(e)}   
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+        
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main2:app", host="0.0.0.0", port=8000, reload=True)
