@@ -6,4 +6,7 @@ python-multipart
 python-dotenv
 requests==2.31.0
 pikepdf
-
+requests
+urllib3
+pymupdf
+Pillow
