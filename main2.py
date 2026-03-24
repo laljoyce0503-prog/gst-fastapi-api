@@ -255,6 +255,74 @@ def get_gst_districts(gst_code: str):
         # PROFESSIONAL FIX: Silent catch - never return 500 for a proxy lookup
         print(f"District lookup failed: {str(e)}")
         return []
+@app.get("/api/proxy/jurisdiction/{path:path}")
+def proxy_jurisdiction(path: str):
+    """
+    Generic proxy for GST Jurisdiction APIs (Commissionerate, Division, Range).
+    """
+    import requests
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json, text/plain, /",
+        "Origin": "https://reg.gst.gov.in",
+        "Referer": "https://reg.gst.gov.in/registration/"
+    }
+
+    url = f"https://reg.gst.gov.in/master/jursd/bypincode/{path}"
+
+    try:
+        response = requests.get(url, headers=headers, timeout=10, verify=False)
+        if response.status_code == 200:
+            return response.json()
+        return {"data": [], "error": f"Upstream returned {response.status_code}"}
+    except Exception as e:
+        print(f"Proxy error for path {path}: {e}")
+        return {"data": [], "error": str(e)}
+
+
+@app.get("/api/ghataks/{state_code}")
+def get_ghataks(state_code: str):
+    """
+    Fetch Sector/Circle/Ward (Ghatak) from GST portal
+    """
+    import requests
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json, text/plain, /",
+        "Origin": "https://reg.gst.gov.in",
+        "Referer": "https://reg.gst.gov.in/registration/"
+    }
+
+    url = f"https://reg.gst.gov.in/master/jursd/cd/state/{state_code}"
+
+    try:
+        response = requests.get(url, headers=headers, timeout=10, verify=False)
+
+        if response.status_code == 200:
+            data = response.json()
+
+            # ✅ SAFE PARSING
+            if (
+                isinstance(data, dict)
+                and "data" in data
+                and isinstance(data["data"], list)
+                and len(data["data"]) > 0
+            ):
+                first = data["data"][0]
+
+                if isinstance(first, dict) and "n" in first:
+                    return first["n"]
+
+        return []
+    except Exception as e:
+        print(f"Error fetching ghataks for state {state_code}: {e}")
+        return []
         
 if __name__ == "__main__":
     import uvicorn
