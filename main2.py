@@ -19,18 +19,11 @@ app.add_middleware(
 )
 
 # Database Configuration
-
+#db_config = {"host": "localhost","user": "root","password": "Joyce@0503","database": "gst_db","charset": "utf8mb4"}
 
 import os
-db_config = {
-    "host": os.getenv("MYSQLHOST"),
-    "user": os.getenv("MYSQLUSER"),
-    "password": os.getenv("MYSQLPASSWORD"),
-    "database": os.getenv("MYSQLDATABASE"),
-    "port": int(os.getenv("MYSQLPORT")),
-    "charset": "utf8mb4"
-}
-#db_config = {"host": os.getenv("MYSQLHOST"),"user": os.getenv("MYSQLUSER"),"password": os.getenv("MYSQLPASSWORD"),"database": os.getenv("MYSQLDATABASE"),"port": int(os.getenv("MYSQLPORT"))}
+
+db_config = {"host": os.getenv("MYSQLHOST"),"user": os.getenv("MYSQLUSER"),"password": os.getenv("MYSQLPASSWORD"),"database": os.getenv("MYSQLDATABASE"),"port": int(os.getenv("MYSQLPORT"))}
 # --- Pydantic Models ---
 class Submission(BaseModel):
     form_key: str
@@ -148,13 +141,40 @@ def get_drafts_by_mobile_or_id(mobile_or_id: str):
         
         if is_id:
             cursor.execute("SELECT * FROM vueform_drafts WHERE id = %s", (mobile_or_id,))
+            results = cursor.fetchall()
         else:
-            cursor.execute("SELECT * FROM vueform_drafts WHERE mobile_number = %s ORDER BY last_updated DESC", (mobile_or_id,))
+            # Search by dedicated column AND inside JSON for _contact_mobile
+            sql = "SELECT * FROM vueform_drafts WHERE mobile_number = %s OR form_data LIKE %s ORDER BY last_updated DESC"
+            cursor.execute(sql, (mobile_or_id, f'%"{mobile_or_id}"%',))
+            results = cursor.fetchall()
             
-        results = cursor.fetchall()
+        final_results = []
         for row in results:
             row["form_data"] = safe_json_loads(row["form_data"])
-        return results
+            
+            if is_id:
+                final_results.append(row)
+                continue
+
+            # Verification logic for JSON content (Mobile or Email)
+            def is_match(data):
+                if isinstance(data, dict):
+                    # Check mobile
+                    if str(data.get("_contact_mobile", "")) == mobile_or_id: return True
+                    if str(data.get("mobile", "")) == mobile_or_id: return True
+                    # Check email
+                    if str(data.get("_contact_email", "")).lower() == mobile_or_id.lower(): return True
+                    if str(data.get("email", "")).lower() == mobile_or_id.lower(): return True
+                    
+                    return any(is_match(v) for v in data.values())
+                elif isinstance(data, list):
+                    return any(is_match(i) for i in data)
+                return False
+            
+            if row.get("mobile_number") == mobile_or_id or is_match(row["form_data"]):
+                final_results.append(row)
+
+        return final_results
     finally:
         cursor.close()
         conn.close()
@@ -183,19 +203,22 @@ def search_submissions_by_mobile_or_id(mobile_or_id: str):
                 final_results.append(row)
                 continue
 
-            # Double check for mobile match if not ID search
-            def find_mobile(data):
+            # Verification logic for JSON content (Mobile or Email)
+            def is_match(data):
                 if isinstance(data, dict):
-                    if str(data.get("_contact_mobile", "")) == mobile_or_id:
-                        return True
-                    if str(data.get("mobile", "")) == mobile_or_id: 
-                        return True
-                    return any(find_mobile(v) for v in data.values())
+                    # Check mobile
+                    if str(data.get("_contact_mobile", "")) == mobile_or_id: return True
+                    if str(data.get("mobile", "")) == mobile_or_id: return True
+                    # Check email
+                    if str(data.get("_contact_email", "")).lower() == mobile_or_id.lower(): return True
+                    if str(data.get("email", "")).lower() == mobile_or_id.lower(): return True
+                    
+                    return any(is_match(v) for v in data.values())
                 elif isinstance(data, list):
-                    return any(find_mobile(i) for i in data)
+                    return any(is_match(i) for i in data)
                 return False
             
-            if find_mobile(row["form_data"]):
+            if is_match(row["form_data"]):
                 final_results.append(row)
                 
         return final_results
