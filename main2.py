@@ -1,13 +1,11 @@
 import json
 import mysql.connector
+import requests
 from fastapi import FastAPI, HTTPException, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict, Any, Optional, List
 import os
-from fastapi import UploadFile, File
-from fastapi.responses import StreamingResponse
-import io
 
 app = FastAPI(title="GST Database API")
 
@@ -21,22 +19,21 @@ app.add_middleware(
 )
 
 # Database Configuration
-#db_config = {"host": "localhost","user": "root","password": "Joyce@0503","database": "gst_db","charset": "utf8mb4"}
+db_config = {"host": "localhost","user": "root","password": "Joyce@0503","database": "gst_db","charset": "utf8mb4"}
 
 import os
-db_config = {
-    "host": os.getenv("MYSQLHOST"),
-    "user": os.getenv("MYSQLUSER"),
-    "password": os.getenv("MYSQLPASSWORD"),
-    "database": os.getenv("MYSQLDATABASE"),
-    "port": int(os.getenv("MYSQLPORT")),
-    "charset": "utf8mb4"
-}
+
 #db_config = {"host": os.getenv("MYSQLHOST"),"user": os.getenv("MYSQLUSER"),"password": os.getenv("MYSQLPASSWORD"),"database": os.getenv("MYSQLDATABASE"),"port": int(os.getenv("MYSQLPORT"))}
 # --- Pydantic Models ---
 class Submission(BaseModel):
     form_key: str
     form_data: Dict[str, Any]
+
+class Draft(BaseModel):
+    mobile_number: str
+    form_data: Dict[str, Any]
+    current_page: int
+    status: Optional[str] = "draft"
 
 # --- Helper Functions ---
 def get_db_connection():
@@ -44,6 +41,30 @@ def get_db_connection():
         return mysql.connector.connect(**db_config)
     except mysql.connector.Error as err:
         raise HTTPException(status_code=500, detail=f"Database Connection Error: {err}")
+
+def init_db():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # Create drafts table if it doesn't exist
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS vueform_drafts (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                mobile_number VARCHAR(20) NOT NULL,
+                form_data LONGTEXT NOT NULL,
+                current_page INT DEFAULT 0,
+                status VARCHAR(20) DEFAULT 'draft',
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX (mobile_number)
+            )
+        """)
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+
+# Initialize DB on startup
+init_db()
 
 def safe_json_loads(data: str):
     """Safely parse JSON from LONGTEXT column, handle plain strings if necessary."""
@@ -62,11 +83,148 @@ def read_root():
         "endpoints": {
             "all_data": "/api/submissions",
             "search": "/api/submissions/search?key=your_key",
+            "drafts": "/api/drafts",
             "docs": "/docs"
         }
     }
 
-# 1. GET ALL: Fetch existing data from the table
+# --- DRAFT ROUTES ---
+
+@app.post("/api/drafts", status_code=201)
+def save_draft(draft: Draft):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # We always upsert for a specific mobile number or if you want multiple drafts, we can handle by ID
+        # For simplicity based on requirements, we check if draft exists for this mobile
+        form_data_str = json.dumps(draft.form_data)
+        
+        # Check if a draft already exists for this mobile number to update it, 
+        # or we could just allow multiple drafts. Requirement says "Show list of saved drafts".
+        # So we allow multiple drafts.
+        sql = """
+            INSERT INTO vueform_drafts (mobile_number, form_data, current_page, status) 
+            VALUES (%s, %s, %s, %s)
+        """
+        cursor.execute(sql, (draft.mobile_number, form_data_str, draft.current_page, draft.status))
+        conn.commit()
+        return {"id": cursor.lastrowid, "message": "Draft saved successfully"}
+    finally:
+        cursor.close()
+        conn.close()
+
+@app.put("/api/drafts/{draft_id}")
+def update_draft(draft_id: int, draft: Draft):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        form_data_str = json.dumps(draft.form_data)
+        sql = """
+            UPDATE vueform_drafts 
+            SET form_data = %s, current_page = %s, status = %s 
+            WHERE id = %s
+        """
+        cursor.execute(sql, (form_data_str, draft.current_page, draft.status, draft_id))
+        conn.commit()
+        return {"message": "Draft updated successfully"}
+    finally:
+        cursor.close()
+        conn.close()
+
+@app.get("/api/drafts/{mobile_or_id}")
+def get_drafts_by_mobile_or_id(mobile_or_id: str):
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        # Check if it's an ID (numeric and not 10 digits)
+        is_id = mobile_or_id.isdigit() and len(mobile_or_id) < 10
+        
+        if is_id:
+            cursor.execute("SELECT * FROM vueform_drafts WHERE id = %s", (mobile_or_id,))
+        else:
+            cursor.execute("SELECT * FROM vueform_drafts WHERE mobile_number = %s ORDER BY last_updated DESC", (mobile_or_id,))
+            
+        results = cursor.fetchall()
+        for row in results:
+            row["form_data"] = safe_json_loads(row["form_data"])
+        return results
+    finally:
+        cursor.close()
+        conn.close()
+
+@app.get("/api/submissions/search/mobile/{mobile_or_id}")
+def search_submissions_by_mobile_or_id(mobile_or_id: str):
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        is_id = mobile_or_id.isdigit() and len(mobile_or_id) < 10
+        
+        if is_id:
+            cursor.execute("SELECT * FROM vueform_sub WHERE id = %s", (mobile_or_id,))
+            results = cursor.fetchall()
+        else:
+            # Search inside JSON form_data for _contact_mobile
+            sql = "SELECT * FROM vueform_sub WHERE form_data LIKE %s ORDER BY id DESC"
+            cursor.execute(sql, (f'%"{mobile_or_id}"%',))
+            results = cursor.fetchall()
+        
+        final_results = []
+        for row in results:
+            row["form_data"] = safe_json_loads(row["form_data"])
+            
+            if is_id:
+                final_results.append(row)
+                continue
+
+            # Double check for mobile match if not ID search
+            def find_mobile(data):
+                if isinstance(data, dict):
+                    if str(data.get("_contact_mobile", "")) == mobile_or_id:
+                        return True
+                    if str(data.get("mobile", "")) == mobile_or_id: 
+                        return True
+                    return any(find_mobile(v) for v in data.values())
+                elif isinstance(data, list):
+                    return any(find_mobile(i) for i in data)
+                return False
+            
+            if find_mobile(row["form_data"]):
+                final_results.append(row)
+                
+        return final_results
+    finally:
+        cursor.close()
+        conn.close()
+
+@app.get("/api/drafts/id/{draft_id}")
+def get_draft_by_id(draft_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT * FROM vueform_drafts WHERE id = %s", (draft_id,))
+        result = cursor.fetchone()
+        if not result:
+            raise HTTPException(status_code=404, detail="Draft not found")
+        result["form_data"] = safe_json_loads(result["form_data"])
+        return result
+    finally:
+        cursor.close()
+        conn.close()
+
+@app.delete("/api/drafts/{draft_id}")
+def delete_draft(draft_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM vueform_drafts WHERE id = %s", (draft_id,))
+        conn.commit()
+        return {"message": "Draft deleted"}
+    finally:
+        cursor.close()
+        conn.close()
+
+# --- SUBMISSION ROUTES ---
+
 @app.get("/api/submissions", response_model=List[Dict[str, Any]])
 def get_submissions():
     conn = get_db_connection()
@@ -74,16 +232,12 @@ def get_submissions():
     try:
         cursor.execute("SELECT * FROM vueform_sub ORDER BY id DESC")
         results = cursor.fetchall()
-        
         for row in results:
             row["form_data"] = safe_json_loads(row["form_data"])
-            
         return results
     finally:
         cursor.close()
         conn.close()
-
-# 2. SEARCH: Filter by form_key (useful if you have many forms)
 @app.get("/api/submissions/search")
 def search_submissions(key: str = Query(..., description="The form_key to filter by")):
     conn = get_db_connection()
@@ -118,38 +272,117 @@ def get_submission(item_id: int):
         cursor.close()
         conn.close()
 
-# 4. POST: Add new data
+# 4. POST: Add new submission
 @app.post("/api/submissions", status_code=201)
-
-#def create_submission(submission: Submission):
-    #conn = get_db_connection()
-    #cursor = conn.cursor()
-    #try:
-        #form_data_str = json.dumps(submission.form_data)
-        #sql = "INSERT INTO vueform_sub (form_key, form_data) VALUES (%s, %s)"
-        #cursor.execute(sql, (submission.form_key, form_data_str))
-        #conn.commit()
-        #return {"id": cursor.lastrowid, "message": "Record added to database"}
-    #finally:
-        #cursor.close()
-        #conn.close()
-def create_submission(payload: Dict[str, Any] = Body(...)):
+def create_submission(submission: Submission):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        form_key = payload.get("form_key", "gst_registration")
+        # 🔥 THE UNWRAPPER: If frontend sends {form_data: {form_data: ...}}, we stay flat.
+        data = submission.form_data
+        while "form_data" in data and isinstance(data["form_data"], dict):
+            data = data["form_data"]
 
-        form_data_str = json.dumps(payload)
-
+        form_data_str = json.dumps(data)
         sql = "INSERT INTO vueform_sub (form_key, form_data) VALUES (%s, %s)"
-        cursor.execute(sql, (form_key, form_data_str))
+        cursor.execute(sql, (submission.form_key, form_data_str))
         conn.commit()
+        return {"id": cursor.lastrowid, "message": "Record added successfully"}
+    finally:
+        cursor.close()
+        conn.close()
 
-        return {
-            "id": cursor.lastrowid,
-            "message": "Record added successfully"
-        }
+import requests
 
+@app.get("/api/proxy/jurisdiction/{path:path}")
+def proxy_jurisdiction(path: str):
+    """
+    Generic proxy for GST Jurisdiction APIs (Commissionerate, Division, Range).
+    """
+    import requests
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://reg.gst.gov.in",
+        "Referer": "https://reg.gst.gov.in/registration/"
+    }
+
+    url = f"https://reg.gst.gov.in/master/jursd/bypincode/{path}"
+
+    try:
+        response = requests.get(url, headers=headers, timeout=10, verify=False)
+        if response.status_code == 200:
+            return response.json()
+        return {"data": [], "error": f"Upstream returned {response.status_code}"}
+    except Exception as e:
+        print(f"Proxy error for path {path}: {e}")
+        return {"data": [], "error": str(e)}
+
+
+@app.get("/api/ghataks/{state_code}")
+def get_ghataks(state_code: str):
+    """
+    Fetch Sector/Circle/Ward (Ghatak) from GST portal
+    """
+    import requests
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://reg.gst.gov.in",
+        "Referer": "https://reg.gst.gov.in/registration/"
+    }
+
+    url = f"https://reg.gst.gov.in/master/jursd/cd/state/{state_code}"
+
+    try:
+        response = requests.get(url, headers=headers, timeout=10, verify=False)
+
+        if response.status_code == 200:
+            data = response.json()
+
+            # ✅ SAFE PARSING
+            if (
+                isinstance(data, dict)
+                and "data" in data
+                and isinstance(data["data"], list)
+                and len(data["data"]) > 0
+            ):
+                first = data["data"][0]
+
+                if isinstance(first, dict) and "n" in first:
+                    return first["n"]
+
+        return []
+    except Exception as e:
+        print(f"Error fetching ghataks for state {state_code}: {e}")
+        return []        
+
+# 5. PUT: Full replacement of existing submission
+@app.put("/api/submissions/{item_id}")
+def update_submission_put(item_id: int, submission: Submission):
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT id FROM vueform_sub WHERE id = %s", (item_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Record not found")
+
+        # 🔥 THE UNWRAPPER: Same logic for updates
+        data = submission.form_data
+        while "form_data" in data and isinstance(data["form_data"], dict):
+            data = data["form_data"]
+
+        form_data_str = json.dumps(data)
+        sql = "UPDATE vueform_sub SET form_key = %s, form_data = %s WHERE id = %s"
+        cursor.execute(sql, (submission.form_key, form_data_str, item_id))
+        conn.commit()
+        return {"message": "Updated successfully", "id": item_id}
     finally:
         cursor.close()
         conn.close()
@@ -169,65 +402,6 @@ def delete_submission(item_id: int):
         cursor.close()
         conn.close()
 
-
-
-# 4. PATCH: Update partial data inside form_data (e.g., TRN number)
-@app.patch("/api/submissions/{item_id}")
-def update_submission(item_id: int, payload: Dict[str, Any] = Body(...)):
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-    try:
-        # Fetch existing record
-        cursor.execute("SELECT form_data FROM vueform_sub WHERE id = %s", (item_id,))
-        row = cursor.fetchone()
-
-        if not row:
-            raise HTTPException(status_code=404, detail="Record not found")
-
-        # Load existing JSON
-        existing_data = safe_json_loads(row["form_data"])
-        if not isinstance(existing_data, dict):
-            existing_data = {}
-
-        # Merge incoming payload into form_data
-        for key, value in payload.items():
-            existing_data[key] = value
-
-        # Save back to DB
-        cursor.execute(
-            "UPDATE vueform_sub SET form_data = %s WHERE id = %s",
-            (json.dumps(existing_data), item_id)
-        )
-        conn.commit()
-
-        return {
-            "message": "Record updated successfully",
-            "id": item_id,
-            "updated_fields": payload
-        }
-
-    finally:
-        cursor.close()
-        conn.close()
-        
-# 5. PUT: Full replacement of existing submission
-@app.put("/api/submissions/{item_id}")
-def update_submission_put(item_id: int, submission: Submission):
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-    try:
-        cursor.execute("SELECT id FROM vueform_sub WHERE id = %s", (item_id,))
-        if not cursor.fetchone():
-            raise HTTPException(status_code=404, detail="Record not found")
-
-        form_data_str = json.dumps(submission.form_data)
-        sql = "UPDATE vueform_sub SET form_key = %s, form_data = %s WHERE id = %s"
-        cursor.execute(sql, (submission.form_key, form_data_str, item_id))
-        conn.commit()
-        return {"message": "Updated successfully", "id": item_id}
-    finally:
-        cursor.close()
-        conn.close()
 
 @app.get("/api/gst/districts/{gst_code}")
 def get_gst_districts(gst_code: str):
@@ -258,193 +432,36 @@ def get_gst_districts(gst_code: str):
         # PROFESSIONAL FIX: Silent catch - never return 500 for a proxy lookup
         print(f"District lookup failed: {str(e)}")
         return []
-@app.get("/api/proxy/jurisdiction/{path:path}")
-def proxy_jurisdiction(path: str):
-    """
-    Generic proxy for GST Jurisdiction APIs (Commissionerate, Division, Range).
-    """
-    import requests
-    import urllib3
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json, text/plain, /",
-        "Origin": "https://reg.gst.gov.in",
-        "Referer": "https://reg.gst.gov.in/registration/"
-    }
-
-    url = f"https://reg.gst.gov.in/master/jursd/bypincode/{path}"
-
+# 7. PATCH: Update partial data inside form_data (merge)
+@app.patch("/api/submissions/{item_id}")
+def patch_submission(item_id: int, payload: Dict[str, Any] = Body(...)):
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
     try:
-        response = requests.get(url, headers=headers, timeout=10, verify=False)
-        if response.status_code == 200:
-            return response.json()
-        return {"data": [], "error": f"Upstream returned {response.status_code}"}
-    except Exception as e:
-        print(f"Proxy error for path {path}: {e}")
-        return {"data": [], "error": str(e)}
+        cursor.execute("SELECT form_data FROM vueform_sub WHERE id = %s", (item_id,))
+        row = cursor.fetchone()
 
+        if not row:
+            raise HTTPException(status_code=404, detail="Record not found")
 
-@app.get("/api/ghataks/{state_code}")
-def get_ghataks(state_code: str):
-    """
-    Fetch Sector/Circle/Ward (Ghatak) from GST portal
-    """
-    import requests
-    import urllib3
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        existing_data = safe_json_loads(row["form_data"])
+        if not isinstance(existing_data, dict):
+            existing_data = {}
 
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json, text/plain, /",
-        "Origin": "https://reg.gst.gov.in",
-        "Referer": "https://reg.gst.gov.in/registration/"
-    }
+        for key, value in payload.items():
+            existing_data[key] = value
 
-    url = f"https://reg.gst.gov.in/master/jursd/cd/state/{state_code}"
-
-    try:
-        response = requests.get(url, headers=headers, timeout=10, verify=False)
-
-        if response.status_code == 200:
-            data = response.json()
-
-            # ✅ SAFE PARSING
-            if (
-                isinstance(data, dict)
-                and "data" in data
-                and isinstance(data["data"], list)
-                and len(data["data"]) > 0
-            ):
-                first = data["data"][0]
-
-                if isinstance(first, dict) and "n" in first:
-                    return first["n"]
-
-        return []
-    except Exception as e:
-        print(f"Error fetching ghataks for state {state_code}: {e}")
-        return []
-
-from fastapi import UploadFile, File, HTTPException
-from fastapi.responses import StreamingResponse
-import io
-import os
-import math
-
-# --- PRODUCTION-GRADE PDF COMPRESSION ENGINE ---
-
-def analyze_pdf_type(content: bytes):
-    """Detects if PDF is Text-Based or Scanned using PyMuPDF (fitz)"""
-    try:
-        import fitz
-        doc = fitz.open(stream=content, filetype="pdf")
-        text_count = 0
-        # Check first 2 pages for selectable text
-        for i in range(min(2, len(doc))):
-            text_count += len(doc[i].get_text().strip())
-        doc.close()
-        return "text" if text_count > 50 else "scanned"
-    except Exception as e:
-        print(f"Analysis error: {e}")
-        return "scanned" # Default to scanned for safety
-
-def compress_text_pdf(content: bytes):
-    """Optimizes text-based PDF using pikepdf (Lossless structure optimization)"""
-    try:
-        import pikepdf
-        with pikepdf.open(io.BytesIO(content)) as pdf:
-            out = io.BytesIO()
-            pdf.save(out, linearize=True, compress_streams=True)
-            return out.getvalue()
-    except Exception as e:
-        print(f"Text compression error: {e}")
-        return content
-
-def compress_scanned_pdf(content: bytes, target_size_mb=0.95):
-    """Aggressively compresses scanned PDF by rasterizing and re-building with Pillow"""
-    try:
-        import fitz
-        from PIL import Image
-        
-        doc = fitz.open(stream=content, filetype="pdf")
-        target_bytes = target_size_mb * 1024 * 1024
-        
-        quality = 70
-        scale = 1.0 # 1.0 = original resolution
-        
-        while True:
-            images = []
-            for page in doc:
-                # Rasterize page to image
-                pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
-                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                images.append(img)
-            
-            # Rebuild PDF in memory
-            out_pdf = io.BytesIO()
-            if images:
-                images[0].save(out_pdf, save_all=True, append_images=images[1:], 
-                               format="PDF", quality=quality, optimize=True)
-            
-            final_data = out_pdf.getvalue()
-            
-            # Iterative check
-            if len(final_data) <= target_bytes or (quality <= 30 and scale <= 0.4):
-                doc.close()
-                return final_data
-            
-            # Step down quality or scale
-            if quality > 40:
-                quality -= 15
-            else:
-                scale *= 0.75
-    except Exception as e:
-        print(f"Scanned compression error: {e}")
-        return content
-
-@app.post("/api/compress-pdf")
-async def compress_pdf(file: UploadFile = File(...)):
-    """
-    Hybrid Production-Grade PDF Compression API for GST Registration.
-    Ensures files are < 1MB while preserving text whenever possible.
-    """
-    try:
-        content = await file.read()
-        original_size = len(content)
-        
-        # 1. Detect PDF Type
-        pdf_type = analyze_pdf_type(content)
-        print(f"[Compressor] Input: {original_size/1024:.1f}KB, Type: {pdf_type}")
-        
-        # 2. Apply Adaptive Compression
-        if pdf_type == "text":
-            # Try structure optimization first (preserves text)
-            compressed_data = compress_text_pdf(content)
-            
-            # Fallback: If text optimization isn't enough, apply controlled rasterization
-            if len(compressed_data) > 1024 * 1024:
-                print("[Compressor] Text optimization insufficient (>1MB), falling back to rasterization")
-                compressed_data = compress_scanned_pdf(content)
-        else:
-            # Direct aggressive rasterization for scanned docs
-            compressed_data = compress_scanned_pdf(content)
-            
-        final_size = len(compressed_data)
-        ratio = (original_size - final_size) / original_size if original_size > 0 else 0
-        print(f"[Compressor] Final: {final_size/1024:.1f}KB, Ratio: {ratio:.1%}")
-
-        return StreamingResponse(
-            io.BytesIO(compressed_data), 
-            media_type="application/pdf",
-            headers={"Content-Disposition": f"attachment; filename=compressed_{file.filename}"}
+        cursor.execute(
+            "UPDATE vueform_sub SET form_data = %s WHERE id = %s",
+            (json.dumps(existing_data), item_id)
         )
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-        
+        conn.commit()
+
+        return {"message": "Patched successfully", "id": item_id, "updated_fields": list(payload.keys())}
+    finally:
+        cursor.close()
+        conn.close()
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main2:app", host="0.0.0.0", port=8000, reload=True)
