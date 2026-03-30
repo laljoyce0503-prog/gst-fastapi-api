@@ -19,11 +19,11 @@ app.add_middleware(
 )
 
 # Database Configuration
-#db_config = {"host": "localhost","user": "root","password": "Joyce@0503","database": "gst_db","charset": "utf8mb4"}
+db_config = {"host": "localhost","user": "root","password": "Joyce@0503","database": "gst_db","charset": "utf8mb4"}
 
 import os
 
-db_config = {"host": os.getenv("MYSQLHOST"),"user": os.getenv("MYSQLUSER"),"password": os.getenv("MYSQLPASSWORD"),"database": os.getenv("MYSQLDATABASE"),"port": int(os.getenv("MYSQLPORT"))}
+#db_config = {"host": os.getenv("MYSQLHOST"),"user": os.getenv("MYSQLUSER"),"password": os.getenv("MYSQLPASSWORD"),"database": os.getenv("MYSQLDATABASE"),"port": int(os.getenv("MYSQLPORT"))}
 # --- Pydantic Models ---
 class Submission(BaseModel):
     form_key: str
@@ -127,6 +127,20 @@ def update_draft(draft_id: int, draft: Draft):
         cursor.execute(sql, (form_data_str, draft.current_page, draft.status, draft_id))
         conn.commit()
         return {"message": "Draft updated successfully"}
+    finally:
+        cursor.close()
+        conn.close()
+
+@app.get("/api/drafts", response_model=List[Dict[str, Any]])
+def get_all_drafts():
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT * FROM vueform_drafts ORDER BY last_updated DESC")
+        results = cursor.fetchall()
+        for row in results:
+            row["form_data"] = safe_json_loads(row["form_data"])
+        return results
     finally:
         cursor.close()
         conn.close()
